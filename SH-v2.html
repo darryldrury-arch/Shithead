@@ -1,0 +1,1018 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Shithead Master</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-800">
+  <div id="root"></div>
+  <script type="text/babel">
+
+const { useState, useEffect, useRef, useCallback } = React;
+
+// --- CORE GAME DATA ---
+const SUITS = ['♠', '♥', '♦', '♣'];
+// Hard mode: Ace=1 (lowest). Normal mode: Ace=14 (highest).
+const RANK_NAMES = { 1: 'A', 11: 'J', 12: 'Q', 13: 'K', 14: 'A' };
+const BOT_NAMES = [
+  "CaptainPaws", "NeonNomad", "MandolinManiac", "CurryCrusader", "NullPointer",
+  "BananaBandit", "SirLagsALot", "BodhranBeat", "WaffleWarrior", "DiscoPotato",
+  "GlitchGremlin", "StarshipSurfer", "WhiskerNinja", "TurboTurtle", "JalapenoJumper",
+  "QuantumQuack", "HarmoniumHero", "PixelPioneer", "MightyMuffin", "CosmicCactus"
+];
+
+function createCard(rank, suit) {
+  return {
+    rank,
+    suit,
+    isRed: suit === '♥' || suit === '♦',
+    name: RANK_NAMES[rank] || rank.toString(),
+    id: `${rank}-${suit}-${Math.random().toString(36).slice(2, 8)}`
+  };
+}
+
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// isValidPlay is rank-agnostic — hard mode just uses rank=1 for Ace, which is
+// naturally the lowest value, so all comparisons work correctly without any
+// special-casing beyond the rank value itself.
+function isValidPlay(cardToPlay, topCard) {
+  if (!topCard) return true;
+  // After a 6: must play 6 or higher; 2 and 5 (wilds) are blocked
+  if (topCard.rank === 6) {
+    if (cardToPlay.rank === 2 || cardToPlay.rank === 5) return false;
+    return cardToPlay.rank >= 6;
+  }
+  // After a 7: must play 7 or lower; 10 (wild) is blocked
+  if (topCard.rank === 7) {
+    if (cardToPlay.rank === 10) return false;
+    return cardToPlay.rank <= 7;
+  }
+  // Wilds: 2 resets (can play on anything), 5 reverses (can play on anything), 10 clears
+  if (cardToPlay.rank === 2 || cardToPlay.rank === 5 || cardToPlay.rank === 10) return true;
+  return cardToPlay.rank >= topCard.rank;
+}
+
+function getCardPower(c, hardMode = false) {
+  if (c.rank === 10) return 100;
+  if (c.rank === 2) return 90;
+  if (c.rank === 5) return 80;
+  if (c.rank === 7) return 70;
+  // In hard mode, Ace=1 is already the lowest rank value, power is just its rank
+  return c.rank;
+}
+
+function botSwapCards(bot, hardMode = false) {
+  const allCards = [...bot.hand, ...bot.faceUp];
+  allCards.sort((a, b) => getCardPower(b, hardMode) - getCardPower(a, hardMode));
+  bot.faceUp = allCards.slice(0, 3);
+  bot.hand = allCards.slice(3, 6);
+  bot.hand.sort((a, b) => a.rank - b.rank);
+}
+
+// --- FLYING CARD ANIMATION (pure DOM, no React state) ---
+// Injects a CSS keyframe animation div directly into document.body and removes it when done.
+function flyCard(card, fromRect, toRect, delay = 0, faceDown = false) {
+  if (!fromRect || !toRect) return;
+  // Skip if either rect is at origin (not measured yet) or too close
+  if (fromRect.width === 0 || toRect.width === 0) return;
+  const dist = Math.hypot(toRect.left - fromRect.left, toRect.top - fromRect.top);
+  if (dist < 15) return;
+
+  const dx = toRect.left - fromRect.left;
+  const dy = toRect.top - fromRect.top;
+  const rotate = (Math.random() - 0.5) * 16;
+  const animName = `fly_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+  // Inject keyframe
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes ${animName} {
+      0%   { transform: translate(0,0) rotate(0deg) scale(1);   opacity: 1; }
+      100% { transform: translate(${dx}px,${dy}px) rotate(${rotate}deg) scale(0.88); opacity: 0; }
+    }
+  `;
+  document.head.appendChild(style);
+
+  const el = document.createElement('div');
+  el.style.cssText = `
+    position: fixed;
+    left: ${fromRect.left}px;
+    top: ${fromRect.top}px;
+    width: 70px;
+    height: 100px;
+    z-index: 9999;
+    pointer-events: none;
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    font-weight: bold;
+    box-shadow: 2px 4px 12px rgba(0,0,0,0.5);
+    background: ${faceDown ? '#2563eb' : 'white'};
+    color: ${faceDown ? 'transparent' : (card?.isRed ? '#ef4444' : '#111')};
+    animation: ${animName} 0.4s cubic-bezier(0.25,0.8,0.25,1) ${delay}ms forwards;
+    ${faceDown ? 'background-image: repeating-linear-gradient(45deg,transparent,transparent 10px,rgba(255,255,255,0.1) 10px,rgba(255,255,255,0.1) 20px);' : ''}
+  `;
+  if (!faceDown && card) {
+    el.innerHTML = `<span>${card.name}</span><span style="font-size:14px">${card.suit}</span>`;
+  }
+
+  document.body.appendChild(el);
+  const total = delay + 400 + 50;
+  setTimeout(() => {
+    el.remove();
+    style.remove();
+  }, total);
+}
+
+// --- CARD VIEW COMPONENT ---
+function CardView({ card, onClick, selected, swapSelected, disabled, faceDown, elRef, className = '' }) {
+  const base = 'w-[70px] h-[100px] rounded-md flex flex-col items-center justify-center text-2xl font-bold select-none shadow-md border-2 transition-all duration-150 relative shrink-0';
+
+  if (faceDown) {
+    return (
+      <div
+        ref={elRef}
+        onClick={onClick}
+        className={`${base} bg-blue-600 border-transparent text-transparent ${disabled ? 'opacity-50 pointer-events-none cursor-default' : 'cursor-pointer hover:brightness-110'} ${className}`}
+        style={{ backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(255,255,255,0.1) 10px, rgba(255,255,255,0.1) 20px)' }}
+      />
+    );
+  }
+
+  const color = card?.isRed ? 'text-red-500' : 'text-gray-900';
+  const borderClass = selected
+    ? 'border-yellow-400 -translate-y-3 shadow-yellow-400/40 shadow-lg'
+    : swapSelected
+    ? 'border-orange-500 scale-105 bg-yellow-50'
+    : 'border-transparent';
+  const pointerClass = disabled ? 'opacity-50 pointer-events-none cursor-default' : 'cursor-pointer hover:shadow-xl hover:-translate-y-1';
+
+  return (
+    <div
+      ref={elRef}
+      onClick={onClick}
+      className={`${base} bg-white ${color} ${borderClass} ${pointerClass} ${className}`}
+    >
+      <span>{card?.name}</span>
+      <span className="text-base">{card?.suit}</span>
+    </div>
+  );
+}
+
+// --- LOG PANEL ---
+function LogPanel({ logs, visible, onToggle }) {
+  const logRef = useRef(null);
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [logs]);
+
+  return (
+    <div
+      className={`bg-slate-700 rounded-lg shadow-lg transition-all duration-300 flex flex-col flex-shrink-0 ${visible ? 'w-[220px] p-4' : 'w-[46px] p-2 items-center'}`}
+      style={{ maxHeight: '600px' }}
+    >
+      <button
+        onClick={onToggle}
+        className="bg-blue-600 hover:bg-blue-500 text-white border-none px-2 py-1.5 rounded font-bold mb-2 w-full text-sm transition-colors"
+      >
+        {visible ? 'Hide Log' : '☰'}
+      </button>
+      {visible && <h3 className="text-center text-white font-bold mb-2 text-sm">Game Log</h3>}
+      {visible && (
+        <div
+          ref={logRef}
+          className="flex-1 overflow-y-auto bg-slate-900 rounded p-2 font-mono text-xs border border-slate-700 text-slate-300"
+        >
+          {logs.map((msg, i) => (
+            <div key={i} className="mb-2 pb-1 border-b border-slate-700" dangerouslySetInnerHTML={{ __html: msg }} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// --- MAIN GAME COMPONENT ---
+// ============================================================
+function Home() {
+  const [screen, setScreen] = useState('start');
+  const [numBots, setNumBots] = useState(1);
+  const [hardMode, setHardMode] = useState(true);
+  const [tournamentMode, setTournamentMode] = useState(false);
+
+  // Tournament state
+  const [tournamentScores, setTournamentScores] = useState({});
+  const [tournamentHand, setTournamentHand] = useState(0);
+  const [tournamentWinner, setTournamentWinner] = useState(null);
+
+  // Game state
+  const [deck, setDeck] = useState([]);
+  const [discardPile, setDiscardPile] = useState([]);
+  const [players, setPlayers] = useState([]);
+  const [currentPlayerIndex, setCurrentPlayerIndex] = useState(0);
+  const [direction, setDirection] = useState(1);
+  const [gameState, setGameState] = useState('INIT');
+  const [logs, setLogs] = useState([]);
+  const [logVisible, setLogVisible] = useState(true);
+  const [selectedCards, setSelectedCards] = useState([]);
+  const [swapSelection, setSwapSelection] = useState(null);
+  const [buttonsDisabled, setButtonsDisabled] = useState(false);
+
+  // (no flying card state — animations are pure DOM)
+
+  const turnTimerRef = useRef(null);
+  const gameStateRef = useRef({ deck, discardPile, players, currentPlayerIndex, direction, gameState });
+
+  // DOM refs for animation source/target positions
+  const discardRef = useRef(null);
+  const drawPileRef = useRef(null);
+  const playerHandRef = useRef(null);
+
+  useEffect(() => {
+    gameStateRef.current = { deck, discardPile, players, currentPlayerIndex, direction, gameState };
+  }, [deck, discardPile, players, currentPlayerIndex, direction, gameState]);
+
+  const log = useCallback((msg) => {
+    setLogs(prev => [...prev, msg]);
+  }, []);
+
+  // --- ANIMATION HELPER ---
+  const spawnFlyingCard = useCallback((card, fromRect, toRect, delay = 0, faceDown = false) => {
+    flyCard(card, fromRect, toRect, delay, faceDown === true);
+  }, []);
+
+  const getRect = (ref) => {
+    const r = ref?.current?.getBoundingClientRect();
+    if (!r || (r.left === 0 && r.top === 0 && r.width === 0)) return null;
+    return r;
+  };
+
+  // --- INITIALIZE GAME ---
+  const initializeGame = useCallback((bots, hard, tournament, scores = {}, hand = 0) => {
+    if (turnTimerRef.current) clearTimeout(turnTimerRef.current);
+
+    // In hard mode: Ace = rank 1 (lowest). Normal: Ace = rank 14 (highest).
+    const ranks = hard
+      ? [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+      : [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+
+    let newDeck = [];
+    for (const suit of SUITS) {
+      for (const rank of ranks) {
+        newDeck.push(createCard(rank, suit));
+      }
+    }
+
+    // Hard mode: remove two 10s
+    if (hard) {
+      let tensRemoved = 0;
+      newDeck = newDeck.filter(c => {
+        if (c.rank === 10 && tensRemoved < 2) { tensRemoved++; return false; }
+        return true;
+      });
+    }
+
+    newDeck = shuffle(newDeck);
+
+    const availableNames = shuffle([...BOT_NAMES]);
+    const newPlayers = [];
+    for (let i = 0; i < bots + 1; i++) {
+      newPlayers.push({
+        id: i,
+        isHuman: i === 0,
+        name: i === 0 ? 'You' : availableNames[i - 1],
+        hand: [], faceUp: [], faceDown: [],
+        finished: false
+      });
+    }
+
+    for (let i = 0; i < 3; i++) newPlayers.forEach(p => p.faceDown.push(newDeck.pop()));
+    for (let i = 0; i < 3; i++) newPlayers.forEach(p => p.faceUp.push(newDeck.pop()));
+    for (let i = 0; i < 3; i++) newPlayers.forEach(p => p.hand.push(newDeck.pop()));
+
+    newPlayers.forEach(p => { if (!p.isHuman) botSwapCards(p, hard); });
+    newPlayers[0].hand.sort((a, b) => a.rank - b.rank);
+
+    if (tournament && Object.keys(scores).length === 0) {
+      const initScores = {};
+      newPlayers.forEach(p => { initScores[p.name] = 0; });
+      scores = initScores;
+    }
+
+    setDeck(newDeck);
+    setDiscardPile([]);
+    setPlayers(newPlayers);
+    setDirection(1);
+    setSelectedCards([]);
+    setSwapSelection(null);
+    setGameState('SETUP');
+    setButtonsDisabled(false);
+    setCurrentPlayerIndex(0);
+    setScreen('game');
+    setTournamentScores(scores);
+    setTournamentHand(hand);
+    setTournamentWinner(null);
+
+    const newLogs = [];
+    if (tournament) newLogs.push(`<b>Tournament Hand ${hand + 1} / 15</b>`);
+    if (hard) newLogs.push(`<b>Hard Mode:</b> Two 10s removed. Aces are rank 1 — the lowest card.`);
+    newLogs.push(`<b>Setup Phase:</b> Swap cards between your hand and face-up table cards.`);
+    setLogs(newLogs);
+  }, []);
+
+  // --- FINISH SETUP ---
+  const finishSetup = useCallback(() => {
+    const startIdx = Math.floor(Math.random() * players.length);
+    setGameState('PLAYING');
+    setSwapSelection(null);
+    setCurrentPlayerIndex(startIdx);
+    log(`<b>Game started!</b> ${players[startIdx].name} goes first.`);
+  }, [players, log]);
+
+  // --- PROCESS TURN ---
+  useEffect(() => {
+    if (gameState !== 'PLAYING') return;
+
+    const activePlayers = players.filter(p => !p.finished);
+    if (activePlayers.length <= 1) {
+      const loser = activePlayers[0];
+      log(`<b>Game Over! <span style='color:#ef4444'>${loser?.name}</span> is the Shithead!</b>`);
+
+      if (tournamentMode) {
+        const newScores = { ...tournamentScores };
+        players.forEach(p => {
+          if (p.name !== loser?.name) newScores[p.name] = (newScores[p.name] || 0) + 1;
+        });
+        setTournamentScores(newScores);
+        const winner = Object.entries(newScores).find(([, s]) => s >= 8);
+        if (winner || tournamentHand + 1 >= 15) {
+          if (winner) {
+            setTournamentWinner(winner[0]);
+            log(`<b>🏆 Tournament Over! ${winner[0]} wins with ${winner[1]} victories!</b>`);
+          } else {
+            const sorted = Object.entries(newScores).sort((a, b) => b[1] - a[1]);
+            setTournamentWinner(sorted[0][0]);
+            log(`<b>🏆 Tournament Over after 15 hands! ${sorted[0][0]} wins with ${sorted[0][1]} victories!</b>`);
+          }
+        } else {
+          setTournamentHand(prev => prev + 1);
+        }
+      }
+      setGameState('GAMEOVER');
+      return;
+    }
+
+    const p = players[currentPlayerIndex];
+    if (!p || p.finished) {
+      setCurrentPlayerIndex(prev => (prev + direction + players.length) % players.length);
+      return;
+    }
+
+    if (p.isHuman) {
+      setButtonsDisabled(false);
+      log(`<b>Your turn.</b> Select valid cards to play.`);
+    } else {
+      setButtonsDisabled(true);
+      turnTimerRef.current = setTimeout(() => botTurn(p), 1200);
+    }
+
+    return () => { if (turnTimerRef.current) clearTimeout(turnTimerRef.current); };
+  }, [gameState, currentPlayerIndex, players]);
+
+  // --- ADVANCE TURN ---
+  const advanceTurn = useCallback(() => {
+    setCurrentPlayerIndex(prev => {
+      const gs = gameStateRef.current;
+      return (prev + gs.direction + gs.players.length) % gs.players.length;
+    });
+  }, []);
+
+  // --- DRAW UP TO THREE ---
+  const drawUpToThree = useCallback((player, currentDeck) => {
+    const drawn = [];
+    while (player.hand.length < 3 && currentDeck.length > 0) {
+      const c = currentDeck.pop();
+      drawn.push(c);
+      player.hand.push(c);
+    }
+    player.hand.sort((a, b) => a.rank - b.rank);
+    return drawn;
+  }, []);
+
+  // --- CHECK WIN ---
+  const checkWin = useCallback((player) => {
+    if (player.hand.length === 0 && player.faceUp.length === 0 && player.faceDown.length === 0) {
+      player.finished = true;
+      log(`<b>${player.name} has finished and drops out!</b>`);
+    }
+  }, [log]);
+
+  // --- EXECUTE PLAY EFFECTS ---
+  const executePlayEffects = useCallback((rankPlayed, qty, currentDiscardPile, currentPlayers, curIdx, curDirection) => {
+    let fourOfAKind = false;
+    if (currentDiscardPile.length >= 4) {
+      const lastFour = currentDiscardPile.slice(-4);
+      if (lastFour.every(c => c.rank === lastFour[0].rank)) fourOfAKind = true;
+    }
+
+    if (rankPlayed === 10 || fourOfAKind) {
+      log(`<b>Deck cleared!</b> <span style='color:#eab308'>${currentPlayers[curIdx].name}</span> gets another turn.`);
+      setDiscardPile([]);
+      turnTimerRef.current = setTimeout(() => setGameState(s => s), 800);
+    } else if (rankPlayed === 5) {
+      log(`<b>Play direction reversed!</b>`);
+      setDirection(prev => {
+        const newDir = prev * -1;
+        gameStateRef.current.direction = newDir;
+        if (currentPlayers.length === 2) {
+          const n1 = (curIdx + newDir + currentPlayers.length) % currentPlayers.length;
+          setCurrentPlayerIndex((n1 + newDir + currentPlayers.length) % currentPlayers.length);
+        } else {
+          setCurrentPlayerIndex((curIdx + newDir + currentPlayers.length) % currentPlayers.length);
+        }
+        return newDir;
+      });
+    } else {
+      advanceTurn();
+    }
+  }, [log, advanceTurn]);
+
+  // --- SWAP SELECTION ---
+  const handleSwapSelection = useCallback((index, source) => {
+    if (source !== 'hand' && source !== 'faceup') return;
+    setSwapSelection(prev => {
+      if (!prev) return { index, source };
+      if (prev.source !== source) {
+        setPlayers(oldPlayers => {
+          const np = oldPlayers.map(p => ({ ...p, hand: [...p.hand], faceUp: [...p.faceUp], faceDown: [...p.faceDown] }));
+          const arr1 = prev.source === 'hand' ? np[0].hand : np[0].faceUp;
+          const arr2 = source === 'hand' ? np[0].hand : np[0].faceUp;
+          const temp = arr1[prev.index];
+          arr1[prev.index] = arr2[index];
+          arr2[index] = temp;
+          np[0].hand.sort((a, b) => a.rank - b.rank);
+          return np;
+        });
+      }
+      return null;
+    });
+  }, []);
+
+  // --- TOGGLE PLAY SELECTION ---
+  const togglePlaySelection = useCallback((index, source, card) => {
+    if (source === 'faceup' && players[0].hand.length > 0) return;
+    setSelectedCards(prev => {
+      const selIndex = prev.findIndex(c => c.index === index && c.source === source);
+      if (selIndex > -1) return prev.filter((_, i) => i !== selIndex);
+      if (prev.length > 0 && prev[0].card.rank !== card.rank) return [{ index, source, card }];
+      return [...prev, { index, source, card }];
+    });
+  }, [players]);
+
+  // --- HANDLE CARD CLICK ---
+  const handleCardClick = useCallback((index, source, card) => {
+    if (gameState === 'SETUP') handleSwapSelection(index, source);
+    else if (gameState === 'PLAYING' && currentPlayerIndex === 0) togglePlaySelection(index, source, card);
+  }, [gameState, currentPlayerIndex, handleSwapSelection, togglePlaySelection]);
+
+  // --- PLAY FACE DOWN ---
+  const playFaceDown = useCallback((index) => {
+    const hum = players[0];
+    if (hum.hand.length > 0 || hum.faceUp.length > 0) return;
+
+    const newPlayers = players.map(p => ({ ...p, hand: [...p.hand], faceUp: [...p.faceUp], faceDown: [...p.faceDown] }));
+    const card = newPlayers[0].faceDown.splice(index, 1)[0];
+    const topCard = discardPile.length > 0 ? discardPile[discardPile.length - 1] : null;
+
+    log(`You flipped a ${card.name}${card.suit} blindly.`);
+
+    const discardRect = getRect(discardRef);
+    const handRect = getRect(playerHandRef);
+
+    if (isValidPlay(card, topCard)) {
+      spawnFlyingCard(card, handRect, discardRect, 0, false);
+      const newDiscard = [...discardPile, card];
+      setDiscardPile(newDiscard);
+      checkWin(newPlayers[0]);
+      setPlayers(newPlayers);
+      setDeck([...deck]);
+      executePlayEffects(card.rank, 1, newDiscard, newPlayers, currentPlayerIndex, direction);
+    } else {
+      log(`<b>Invalid play!</b> You picked up the pile.`);
+      discardPile.forEach((c, i) => spawnFlyingCard(c, discardRect, handRect, i * 60));
+      spawnFlyingCard(card, handRect, handRect, discardPile.length * 60);
+      newPlayers[0].hand.push(card, ...discardPile);
+      newPlayers[0].hand.sort((a, b) => a.rank - b.rank);
+      setDiscardPile([]);
+      setPlayers(newPlayers);
+      advanceTurn();
+    }
+  }, [players, discardPile, deck, log, checkWin, executePlayEffects, advanceTurn, currentPlayerIndex, direction, spawnFlyingCard]);
+
+  // --- HUMAN PLAY SELECTED ---
+  const humanPlaySelected = useCallback(() => {
+    if (selectedCards.length === 0) return;
+    const topCard = discardPile.length > 0 ? discardPile[discardPile.length - 1] : null;
+
+    const discardRect = getRect(discardRef);
+    const handRect = getRect(playerHandRef);
+    const drawRect = getRect(drawPileRef);
+
+    if (!isValidPlay(selectedCards[0].card, topCard)) {
+      log(`<b>Invalid Play!</b> ${selectedCards[0].card.name} can't go on ${topCard ? topCard.name : 'empty pile'}. Picking up the pile!`);
+      discardPile.forEach((c, i) => spawnFlyingCard(c, discardRect, handRect, i * 60));
+      const newPlayers = players.map(p => ({ ...p, hand: [...p.hand], faceUp: [...p.faceUp], faceDown: [...p.faceDown] }));
+      newPlayers[0].hand.push(...discardPile);
+      newPlayers[0].hand.sort((a, b) => a.rank - b.rank);
+      setDiscardPile([]);
+      setPlayers(newPlayers);
+      setSelectedCards([]);
+      setButtonsDisabled(true);
+      advanceTurn();
+      return;
+    }
+
+    const rankPlayed = selectedCards[0].card.rank;
+    const qty = selectedCards.length;
+    const sorted = [...selectedCards].sort((a, b) => b.index - a.index);
+
+    // Animate each played card flying to discard
+    sorted.forEach((sel, i) => spawnFlyingCard(sel.card, handRect, discardRect, i * 60));
+
+    const newPlayers = players.map(p => ({ ...p, hand: [...p.hand], faceUp: [...p.faceUp], faceDown: [...p.faceDown] }));
+    const newDiscard = [...discardPile];
+    for (const sel of sorted) {
+      if (sel.source === 'hand') newDiscard.push(newPlayers[0].hand.splice(sel.index, 1)[0]);
+      if (sel.source === 'faceup') newDiscard.push(newPlayers[0].faceUp.splice(sel.index, 1)[0]);
+    }
+
+    const newDeck = [...deck];
+    const drawn = drawUpToThree(newPlayers[0], newDeck);
+    checkWin(newPlayers[0]);
+
+    // Animate drawn cards flying from draw pile to hand
+    drawn.forEach((c, i) => spawnFlyingCard(c, drawRect, handRect, qty * 60 + i * 80));
+
+    log(`You played ${qty} x ${RANK_NAMES[rankPlayed] || rankPlayed}`);
+
+    setDeck(newDeck);
+    setDiscardPile(newDiscard);
+    setPlayers(newPlayers);
+    setSelectedCards([]);
+    setButtonsDisabled(true);
+    executePlayEffects(rankPlayed, qty, newDiscard, newPlayers, currentPlayerIndex, direction);
+  }, [selectedCards, discardPile, players, deck, log, drawUpToThree, checkWin, executePlayEffects, advanceTurn, currentPlayerIndex, direction, spawnFlyingCard]);
+
+  // --- HUMAN PICK UP ---
+  const humanPickUp = useCallback(() => {
+    if (discardPile.length === 0) return;
+    const discardRect = getRect(discardRef);
+    const handRect = getRect(playerHandRef);
+    discardPile.forEach((c, i) => spawnFlyingCard(c, discardRect, handRect, i * 60));
+    const newPlayers = players.map(p => ({ ...p, hand: [...p.hand], faceUp: [...p.faceUp], faceDown: [...p.faceDown] }));
+    newPlayers[0].hand.push(...discardPile);
+    newPlayers[0].hand.sort((a, b) => a.rank - b.rank);
+    log(`You voluntarily picked up the pile.`);
+    setDiscardPile([]);
+    setPlayers(newPlayers);
+    setSelectedCards([]);
+    setButtonsDisabled(true);
+    advanceTurn();
+  }, [discardPile, players, log, advanceTurn, spawnFlyingCard]);
+
+  // --- BOT TURN ---
+  const botTurn = useCallback((bot) => {
+    const gs = gameStateRef.current;
+    const topCard = gs.discardPile.length > 0 ? gs.discardPile[gs.discardPile.length - 1] : null;
+
+    const newPlayers = gs.players.map(p => ({ ...p, hand: [...p.hand], faceUp: [...p.faceUp], faceDown: [...p.faceDown] }));
+    const botP = newPlayers.find(p => p.id === bot.id);
+    const newDeck = [...gs.deck];
+    let newDiscard = [...gs.discardPile];
+
+    const discardRect = getRect(discardRef);
+    const drawRect = getRect(drawPileRef);
+
+    // Get the bot's DOM element for animation source
+    const botEl = document.getElementById(`bot-area-${bot.id}`);
+    const botRect = botEl ? botEl.getBoundingClientRect() : discardRect;
+
+    let source = 'hand';
+    let activeSet = botP.hand;
+    if (activeSet.length === 0) { activeSet = botP.faceUp; source = 'faceup'; }
+
+    if (activeSet.length === 0 && botP.faceDown.length > 0) {
+      const card = botP.faceDown.pop();
+      log(`${botP.name} flipped a ${card.name}${card.suit} blindly.`);
+      if (isValidPlay(card, topCard)) {
+        spawnFlyingCard(card, botRect, discardRect, 0, false);
+        newDiscard.push(card);
+        checkWin(botP);
+        setDeck(newDeck); setDiscardPile(newDiscard); setPlayers(newPlayers);
+        executePlayEffects(card.rank, 1, newDiscard, newPlayers, gs.currentPlayerIndex, gs.direction);
+      } else {
+        log(`${botP.name} failed and picked up the pile.`);
+        newDiscard.forEach((c, i) => spawnFlyingCard(c, discardRect, botRect, i * 60));
+        botP.hand.push(card, ...newDiscard);
+        botP.hand.sort((a, b) => a.rank - b.rank);
+        newDiscard = [];
+        setDeck(newDeck); setDiscardPile(newDiscard); setPlayers(newPlayers);
+        advanceTurn();
+      }
+      return;
+    }
+
+    const groups = {};
+    activeSet.forEach((c, idx) => {
+      if (isValidPlay(c, topCard)) {
+        if (!groups[c.rank]) groups[c.rank] = [];
+        groups[c.rank].push({ card: c, index: idx });
+      }
+    });
+
+    const validRanks = Object.keys(groups).map(Number).sort((a, b) => a - b);
+
+    if (validRanks.length > 0) {
+      const rankToPlay = validRanks[0];
+      const cardsToPlay = groups[rankToPlay].sort((a, b) => b.index - a.index);
+      cardsToPlay.forEach((item, i) => {
+        spawnFlyingCard(item.card, botRect, discardRect, i * 60);
+        newDiscard.push(activeSet.splice(item.index, 1)[0]);
+      });
+
+      log(`${botP.name} played ${cardsToPlay.length} x ${RANK_NAMES[rankToPlay] || rankToPlay}`);
+
+      if (source === 'hand') {
+        const drawn = drawUpToThree(botP, newDeck);
+        drawn.forEach((c, i) => spawnFlyingCard(c, drawRect, botRect, cardsToPlay.length * 60 + i * 80, true));
+      }
+      checkWin(botP);
+      setDeck(newDeck); setDiscardPile(newDiscard); setPlayers(newPlayers);
+      executePlayEffects(rankToPlay, cardsToPlay.length, newDiscard, newPlayers, gs.currentPlayerIndex, gs.direction);
+    } else {
+      const shownCard = activeSet[0];
+      log(`${botP.name} shows ${shownCard.name}${shownCard.suit} (can't go) and picks up the pile.`);
+      newDiscard.forEach((c, i) => spawnFlyingCard(c, discardRect, botRect, i * 60, true));
+      botP.hand.push(...newDiscard);
+      botP.hand.sort((a, b) => a.rank - b.rank);
+      newDiscard = [];
+      setDeck(newDeck); setDiscardPile(newDiscard); setPlayers(newPlayers);
+      advanceTurn();
+    }
+  }, [log, checkWin, drawUpToThree, executePlayEffects, advanceTurn, spawnFlyingCard]);
+
+  // --- PLAY AGAIN / NEXT HAND ---
+  const handlePlayAgain = useCallback(() => {
+    if (tournamentMode && !tournamentWinner) {
+      initializeGame(numBots, hardMode, true, tournamentScores, tournamentHand);
+    } else {
+      setScreen('start');
+      setTournamentScores({});
+      setTournamentHand(0);
+      setTournamentWinner(null);
+    }
+  }, [tournamentMode, tournamentWinner, numBots, hardMode, tournamentScores, tournamentHand, initializeGame]);
+
+  // ============================================================
+  // --- START SCREEN ---
+  // ============================================================
+  if (screen === 'start') {
+    return (
+      <div className="min-h-screen bg-slate-800 text-slate-100 flex flex-col items-center justify-center p-6">
+        <div className="bg-slate-700 rounded-xl shadow-2xl p-8 max-w-md w-full text-center space-y-6">
+          <h1 className="text-4xl font-bold tracking-tight">Shithead Master</h1>
+          <p className="text-slate-400 text-sm">Select opponents and options, then start the game.</p>
+
+          <div className="space-y-2">
+            <p className="text-sm font-semibold text-slate-300">Opponents</p>
+            <div className="flex gap-3 justify-center">
+              {[1, 2, 3].map(n => (
+                <button
+                  key={n}
+                  onClick={() => setNumBots(n)}
+                  className={`px-5 py-2.5 rounded-lg font-bold text-sm transition-all ${numBots === n ? 'bg-emerald-600 text-white shadow-lg scale-105' : 'bg-slate-600 text-slate-300 hover:bg-slate-500'}`}
+                >
+                  {n} Bot{n > 1 ? 's' : ''}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-3 text-left">
+            <label className="flex items-center gap-3 cursor-pointer group">
+              <input
+                type="checkbox"
+                checked={hardMode}
+                onChange={() => setHardMode(v => !v)}
+                className="w-5 h-5 accent-emerald-600"
+              />
+              <div>
+                <span className="font-semibold text-sm group-hover:text-emerald-400 transition-colors">Hard Mode</span>
+                <p className="text-xs text-slate-400">Two 10s removed. Aces are rank 1 — the lowest card (can't beat anything).</p>
+              </div>
+            </label>
+            <label className="flex items-center gap-3 cursor-pointer group">
+              <input
+                type="checkbox"
+                checked={tournamentMode}
+                onChange={() => setTournamentMode(v => !v)}
+                className="w-5 h-5 accent-emerald-600"
+              />
+              <div>
+                <span className="font-semibold text-sm group-hover:text-emerald-400 transition-colors">Tournament</span>
+                <p className="text-xs text-slate-400">Play up to 15 hands. First to 8 wins takes the trophy.</p>
+              </div>
+            </label>
+          </div>
+
+          <button
+            onClick={() => initializeGame(numBots, hardMode, tournamentMode)}
+            className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-lg transition-all shadow-lg"
+          >
+            Start Game
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ============================================================
+  // --- GAME SCREEN ---
+  // ============================================================
+  const hum = players[0];
+  const isHumanTurn = gameState === 'PLAYING' && currentPlayerIndex === 0 && !hum?.finished;
+  const topCard = discardPile.length > 0 ? discardPile[discardPile.length - 1] : null;
+
+  return (
+    <div className="min-h-screen bg-slate-800 text-slate-100 p-4 flex flex-col items-center">
+
+
+      {/* Tournament Scoreboard */}
+      {tournamentMode && (
+        <div className="w-full max-w-[1200px] mb-3">
+          <div className="bg-slate-700 rounded-lg p-3 flex flex-wrap items-center gap-4 text-sm">
+            <span className="font-bold text-emerald-400">🏆 Tournament — Hand {tournamentHand + 1}/15</span>
+            <div className="flex gap-4 flex-wrap">
+              {Object.entries(tournamentScores).map(([name, score]) => (
+                <span key={name} className={name === 'You' ? 'text-yellow-400 font-bold' : 'text-slate-300'}>
+                  {name}: <span className="font-bold">{score}</span>
+                </span>
+              ))}
+            </div>
+            {hardMode && <span className="text-orange-400 text-xs font-semibold ml-auto">HARD MODE</span>}
+          </div>
+        </div>
+      )}
+      {!tournamentMode && hardMode && (
+        <div className="w-full max-w-[1200px] mb-3">
+          <div className="bg-orange-900/40 border border-orange-500/40 rounded-lg p-2 text-center">
+            <span className="text-orange-400 text-sm font-semibold">⚠ HARD MODE — Aces are low (rank 1), two 10s removed</span>
+          </div>
+        </div>
+      )}
+
+      <div className="flex gap-5 w-full max-w-[1200px] items-start justify-center flex-wrap lg:flex-nowrap">
+        <LogPanel logs={logs} visible={logVisible} onToggle={() => setLogVisible(v => !v)} />
+
+        <div className="flex-1 flex flex-col gap-4 max-w-[800px] min-w-0">
+
+          {/* Setup Banner */}
+          {gameState === 'SETUP' && (
+            <div className="bg-amber-500 text-slate-900 p-3 text-center rounded-lg font-bold text-sm">
+              SWAP PHASE: Click one hand card and one face-up card to swap them. Put your best cards face up!
+            </div>
+          )}
+
+          {/* Opponents */}
+          <div className="bg-slate-700 rounded-lg p-4 flex flex-wrap gap-3 justify-between">
+            {players.filter(p => !p.isHuman).map(p => {
+              const isActive = gameState === 'PLAYING' && currentPlayerIndex === p.id;
+              return (
+                <div
+                  key={p.id}
+                  id={`bot-area-${p.id}`}
+                  className={`flex-1 min-w-[140px] text-center bg-slate-600 rounded-lg p-3 text-sm transition-all ${isActive ? 'ring-2 ring-yellow-400 bg-slate-500' : ''}`}
+                >
+                  <p className="font-bold">
+                    {p.name}{' '}
+                    {p.finished
+                      ? <span className="text-emerald-400">(Done)</span>
+                      : isActive ? <span className="text-yellow-400">(Active)</span> : ''}
+                  </p>
+                  <p className="text-xs text-slate-400 mt-1">Hand: {p.hand.length} | Hidden: {p.faceDown.length}</p>
+                  <div className="flex gap-1 justify-center mt-2 flex-wrap">
+                    {p.faceUp.map((c, i) => (
+                      <span key={i} className={`text-xs px-1.5 py-0.5 rounded ${c.isRed ? 'bg-red-900/40 text-red-300' : 'bg-slate-800 text-slate-300'}`}>
+                        {c.name}{c.suit}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Center Board */}
+          <div className="bg-slate-700 rounded-lg p-4 flex justify-around text-center gap-4">
+            {/* Draw Pile */}
+            <div className="flex flex-col items-center gap-2 min-w-[100px]">
+              <h3 className="text-sm font-bold text-slate-400">Draw Pile</h3>
+              <div ref={drawPileRef} id="draw-zone">
+                {deck.length > 0 ? (
+                  <div
+                    className="w-[70px] h-[100px] rounded-md bg-blue-600 border-2 border-transparent shadow-md"
+                    style={{ backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(255,255,255,0.1) 10px, rgba(255,255,255,0.1) 20px)' }}
+                  />
+                ) : (
+                  <div className="w-[70px] h-[100px] rounded-md border-2 border-dashed border-slate-500 flex items-center justify-center text-slate-500 text-xs">Empty</div>
+                )}
+              </div>
+              <p className="text-sm font-bold">{deck.length}</p>
+            </div>
+
+            {/* Discard Pile */}
+            <div className="flex flex-col items-center gap-2 min-w-[100px]">
+              <h3 className="text-sm font-bold text-slate-400">Discard</h3>
+              <div ref={discardRef} id="discard-zone">
+                {topCard ? (
+                  <CardView card={topCard} disabled />
+                ) : (
+                  <div className="w-[70px] h-[100px] rounded-md border-2 border-dashed border-slate-500 flex items-center justify-center text-slate-500 text-xs">Empty</div>
+                )}
+              </div>
+              {discardPile.length > 1 && <p className="text-xs font-bold">Pile: {discardPile.length}</p>}
+              {gameState === 'PLAYING' && isHumanTurn && (
+                <button
+                  onClick={humanPickUp}
+                  disabled={buttonsDisabled || discardPile.length === 0}
+                  className="mt-1 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-bold rounded-lg text-sm transition-colors"
+                >
+                  Pick Up Pile
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Player Area */}
+          <div className="bg-slate-700 rounded-lg p-4">
+            <h3 className="text-center font-bold mb-1">Your Cards</h3>
+
+            <p className="text-center text-xs text-slate-400 mb-2">Face Up & Face Down</p>
+            <div className="flex gap-2 min-h-[110px] items-center justify-center flex-wrap mb-4">
+              {hum?.faceDown.map((c, idx) => (
+                <CardView
+                  key={`fd-${idx}`}
+                  card={c}
+                  faceDown
+                  onClick={() => isHumanTurn && hum.hand.length === 0 && hum.faceUp.length === 0 && playFaceDown(idx)}
+                  disabled={!(isHumanTurn && hum.hand.length === 0 && hum.faceUp.length === 0)}
+                />
+              ))}
+              {hum?.faceUp.map((c, idx) => {
+                const isInteractable = gameState === 'SETUP' || (isHumanTurn && hum.hand.length === 0);
+                const isSelected = selectedCards.some(s => s.source === 'faceup' && s.index === idx);
+                const isSwapSel = gameState === 'SETUP' && swapSelection?.source === 'faceup' && swapSelection?.index === idx;
+                return (
+                  <CardView
+                    key={`fu-${c.id}`}
+                    card={c}
+                    onClick={() => isInteractable && handleCardClick(idx, 'faceup', c)}
+                    disabled={!isInteractable}
+                    selected={isSelected}
+                    swapSelected={isSwapSel}
+                  />
+                );
+              })}
+            </div>
+
+            <p className="text-center text-xs text-slate-400 mb-2">Your Hand</p>
+            <div ref={playerHandRef} className="flex gap-2 min-h-[110px] items-center justify-center flex-wrap">
+              {hum?.hand.map((c, idx) => {
+                const isInteractable = gameState === 'SETUP' || isHumanTurn;
+                const isSelected = selectedCards.some(s => s.source === 'hand' && s.index === idx);
+                const isSwapSel = gameState === 'SETUP' && swapSelection?.source === 'hand' && swapSelection?.index === idx;
+                return (
+                  <CardView
+                    key={`h-${c.id}`}
+                    card={c}
+                    onClick={() => isInteractable && handleCardClick(idx, 'hand', c)}
+                    disabled={!isInteractable}
+                    selected={isSelected}
+                    swapSelected={isSwapSel}
+                  />
+                );
+              })}
+            </div>
+
+            <div className="flex justify-center gap-3 mt-4">
+              {gameState === 'SETUP' && (
+                <button
+                  onClick={finishSetup}
+                  className="px-6 py-2.5 bg-orange-500 hover:bg-orange-400 text-white font-bold rounded-lg transition-colors"
+                >
+                  Confirm Swap & Start Game
+                </button>
+              )}
+              {gameState === 'PLAYING' && isHumanTurn && (
+                <button
+                  onClick={humanPlaySelected}
+                  disabled={buttonsDisabled || selectedCards.length === 0}
+                  className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-bold rounded-lg transition-colors"
+                >
+                  Play Selected Cards
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Game Over Panel */}
+          {gameState === 'GAMEOVER' && (
+            <div className="bg-slate-700 rounded-xl p-6 text-center space-y-4">
+              <h2 className="text-2xl font-bold">
+                {tournamentWinner
+                  ? <span>🏆 {tournamentWinner === 'You' ? 'You win the tournament!' : `${tournamentWinner} wins the tournament!`}</span>
+                  : <span>Game Over!</span>
+                }
+              </h2>
+
+              {tournamentMode && !tournamentWinner && (
+                <div className="space-y-2">
+                  <p className="text-slate-400 text-sm">Scores after hand {tournamentHand + 1}:</p>
+                  <div className="flex justify-center gap-4 flex-wrap">
+                    {Object.entries(tournamentScores).sort((a, b) => b[1] - a[1]).map(([name, score]) => (
+                      <div key={name} className={`px-3 py-1 rounded-lg text-sm font-bold ${name === 'You' ? 'bg-yellow-500/20 text-yellow-400' : 'bg-slate-600 text-slate-300'}`}>
+                        {name}: {score}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {tournamentMode && tournamentWinner && (
+                <div className="space-y-2">
+                  <p className="text-slate-400 text-sm">Final Scores:</p>
+                  <div className="flex justify-center gap-4 flex-wrap">
+                    {Object.entries(tournamentScores).sort((a, b) => b[1] - a[1]).map(([name, score]) => (
+                      <div key={name} className={`px-3 py-1 rounded-lg text-sm font-bold ${name === tournamentWinner ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-600 text-slate-300'}`}>
+                        {name}: {score}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-center gap-3">
+                {tournamentMode && !tournamentWinner ? (
+                  <button
+                    onClick={handlePlayAgain}
+                    className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-lg transition-all shadow-lg"
+                  >
+                    Next Hand →
+                  </button>
+                ) : (
+                  <button
+                    onClick={handlePlayAgain}
+                    className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-lg transition-all shadow-lg"
+                  >
+                    Play Again
+                  </button>
+                )}
+                <button
+                  onClick={() => { setScreen('start'); setTournamentScores({}); setTournamentHand(0); setTournamentWinner(null); }}
+                  className="px-6 py-3 bg-slate-600 hover:bg-slate-500 text-white font-bold rounded-lg text-lg transition-all"
+                >
+                  Main Menu
+                </button>
+              </div>
+            </div>
+          )}
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+  const root = ReactDOM.createRoot(document.getElementById('root'));
+  root.render(<Home />);
+  </script>
+</body>
+</html>
